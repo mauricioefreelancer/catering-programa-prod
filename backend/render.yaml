@@ -12,11 +12,11 @@ services:
         value: "20.18.0"
         description: "Versión Node.js LTS (Render usa NODE_VERSION en runtime Node)"
       - key: DATABASE_URL
-        value: "postgresql://CHANGE_ME_BD_RENDER_DATABASE_URL_POOLED?schema=public&pgbouncer=true"
-        description: "⚠️ PENDIENTE: Internal Database URL (pooled/PgBouncer) de la BD nueva en Render. Params schema=public&pgbouncer=true OBLIGATORIOS Prisma"
+        value: "postgresql://catering_db_prod_user:wMjpVnbFzuBnXUrUYABC9R85C45udwvg@dpg-dbb4rtnavr4c73ftpun0-a.oregon-postgres.render.com/catering_db_prod?schema=public&pgbouncer=true"
+        description: "Pooled PgBouncer Interna Render. Params schema=public&pgbouncer=true OBLIGATORIOS Prisma"
       - key: DIRECT_URL
-        value: "postgresql://CHANGE_ME_BD_RENDER_DIRECT_URL?schema=public"
-        description: "⚠️ PENDIENTE: Internal Database URL (directa) de la BD nueva en Render. Usada solo para migraciones Prisma. schema=public OBLIGATORIO."
+        value: "postgresql://catering_db_prod_user:wMjpVnbFzuBnXUrUYABC9R85C45udwvg@dpg-dbb4rtnavr4c73ftpun0-a.oregon-postgres.render.com/catering_db_prod?schema=public"
+        description: "Conexion Directa (sin PgBouncer) Interna Render. Usada solo para migraciones Prisma. schema=public OBLIGATORIO."
       - key: JWT_SECRET
         generateValue: true
         description: "Firma tokens JWT. Genera 64 chars. NO compartir."
@@ -30,7 +30,7 @@ services:
         value: "--dns-result-order=ipv4first --no-warnings"
         description: "Render IPv6 DNS a veces falla. Forzar IPv4 primero (evita ECONNREFUSED health check). Silenciar warnings experimentales JSON modules."
       - key: CORS_ORIGIN
-        value: "https://CHANGE_ME_TU_DOMINIO.netlify.app"
+        value: "https://prismatic-kitten-fb510f.netlify.app"
         description: "⚠️ NO USAR COMILLAS NI BACKTICKS. Dominio Frontend Netlify exacto SIN barra final. Multiple dominios separar coma. Render NO inserta comillas automaticas: ESCRIBE VALOR PLANO."
       - key: TARIFA_PROMEDIO_DEFAULT
         value: "3500"
