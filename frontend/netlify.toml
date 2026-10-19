@@ -6,7 +6,7 @@
 [build.environment]
   NODE_VERSION = "20"
   # ⚠️ PENDIENTE: URL del nuevo backend en Render. SIEMPRE TERMINA CON /api
-  VITE_API_URL = "https://CHANGE_ME_BACKEND_RENDER.onrender.com/api"
+  VITE_API_URL = "https://catering-backend-qe73.onrender.com/api"
 
 [[redirects]]
   from = "/*"
