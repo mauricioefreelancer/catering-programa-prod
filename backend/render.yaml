@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: catering-backend
+    runtime: node
+    plan: starter
+    region: oregon
+    rootDir: backend
+    buildCommand: "npm install && npx prisma generate && npx nest build && npx prisma migrate deploy"
+    startCommand: "node dist/src/main.js"
+    envVars:
+      - key: NODE_VERSION
+        value: "20.18.0"
+        description: "Versión Node.js LTS (Render usa NODE_VERSION en runtime Node)"
+      - key: DATABASE_URL
+        value: "postgresql://CHANGE_ME_BD_RENDER_DATABASE_URL_POOLED?schema=public&pgbouncer=true"
+        description: "⚠️ PENDIENTE: Internal Database URL (pooled/PgBouncer) de la BD nueva en Render. Params schema=public&pgbouncer=true OBLIGATORIOS Prisma"
+      - key: DIRECT_URL
+        value: "postgresql://CHANGE_ME_BD_RENDER_DIRECT_URL?schema=public"
+        description: "⚠️ PENDIENTE: Internal Database URL (directa) de la BD nueva en Render. Usada solo para migraciones Prisma. schema=public OBLIGATORIO."
+      - key: JWT_SECRET
+        generateValue: true
+        description: "Firma tokens JWT. Genera 64 chars. NO compartir."
+      - key: JWT_EXPIRES_IN
+        value: "7d"
+      - key: PORT
+        value: "3000"
+      - key: NODE_ENV
+        value: "production"
+      - key: NODE_OPTIONS
+        value: "--dns-result-order=ipv4first --no-warnings"
+        description: "Render IPv6 DNS a veces falla. Forzar IPv4 primero (evita ECONNREFUSED health check). Silenciar warnings experimentales JSON modules."
+      - key: CORS_ORIGIN
+        value: "https://CHANGE_ME_TU_DOMINIO.netlify.app"
+        description: "⚠️ NO USAR COMILLAS NI BACKTICKS. Dominio Frontend Netlify exacto SIN barra final. Multiple dominios separar coma. Render NO inserta comillas automaticas: ESCRIBE VALOR PLANO."
+      - key: TARIFA_PROMEDIO_DEFAULT
+        value: "3500"
+      - key: UMBRAL_MARGEN
+        value: "30"
+    autoDeploy: true
+    pullRequestPreviewsEnabled: false
+    maxDiskSpaceGB: 10
+    healthCheckPath: "/health"
+    initialDeployHealthCheckTimeoutSeconds: 900
+    healthCheckIntervalSeconds: 20
+    healthCheckTimeoutSeconds: 10
+    numInstances: 1

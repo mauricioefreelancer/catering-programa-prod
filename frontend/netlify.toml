@@ -1,0 +1,22 @@
+[build]
+  command = "npm install && npm run build"
+  publish = "dist"
+  base = ""
+
+[build.environment]
+  NODE_VERSION = "20"
+  # ⚠️ PENDIENTE: URL del nuevo backend en Render. SIEMPRE TERMINA CON /api
+  VITE_API_URL = "https://CHANGE_ME_BACKEND_RENDER.onrender.com/api"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "geolocation=(), microphone=(), camera=()"

@@ -1,0 +1,1374 @@
+import { useState, useMemo, useEffect, useCallback, type ReactNode } from 'react'
+import {
+  Table,
+  Button,
+  Input,
+  Space,
+  Popconfirm,
+  message,
+  Tag,
+  Typography,
+  Form,
+  Select,
+  Tabs,
+  InputNumber,
+  Card,
+  Badge,
+  Drawer,
+  Spin,
+  Checkbox,
+  Modal,
+} from 'antd'
+import { PlusOutlined, SearchOutlined, EditOutlined, DeleteOutlined, DesktopOutlined, ReloadOutlined, DownloadOutlined } from '@ant-design/icons'
+import ModalDrawer from '../../components/common/ModalDrawer'
+import { usePermissions } from '../../hooks/usePermissions'
+import { apiService } from '../../api/services/api'
+import { jsPDF } from 'jspdf'
+import autoTable from 'jspdf-autotable'
+
+const { Title } = Typography
+const { Option } = Select
+
+interface Espiral {
+  id: number
+  espiral: string
+  capacidad_max: number
+  cantidad_actual: number
+  productoId?: number
+  productoNombre?: string
+  precio_venta_cliente?: number
+}
+interface BotonNRQ {
+  id: number
+  boton: string
+  productoId?: number
+  productoNombre?: string
+  precio_venta_cliente?: number
+}
+
+interface MediosPago {
+  efectivo: boolean
+  veos: boolean
+  datafono: boolean
+  cupos: boolean
+  // Seriales alfanuméricos por medio de pago
+  serialVeos?: string
+  serialDatafono?: string
+  serialCupos?: string
+  serialEfectivoMonedero?: string
+  serialEfectivoBilletero?: string
+}
+
+interface Maquina {
+  id: number
+  serial: string
+  marca: string
+  tipo: 'SNACK' | 'BEBIDA' | 'CAFE' | 'COMBINADA'
+  clienteId: number
+  clienteNombre: string
+  operadorId: number
+  operadorNombre: string
+  zona: string
+  base: number
+  estado: 'OPERANDO' | 'FUERA_SERVICIO' | 'MANTENIMIENTO'
+  mediosPago?: MediosPago
+  espirales?: Espiral[]
+  botonesNRQ?: BotonNRQ[]
+}
+
+const genEspiralesVacio = (): Espiral[] => []
+const genBotonesVacio = (): BotonNRQ[] => []
+
+const normalizarTipo = (t: any): 'SNACK' | 'BEBIDA' | 'CAFE' | 'COMBINADA' => {
+  const s = String(t || '').toUpperCase()
+  if (s === 'SNACK' || s === 'BEBIDA' || s === 'CAFE' || s === 'CAFÉ' || s === 'COMBINADA') {
+    if (s === 'CAFÉ') return 'CAFE'
+    return s as any
+  }
+  return 'SNACK'
+}
+
+const normalizarEstado = (e: any): 'OPERANDO' | 'FUERA_SERVICIO' | 'MANTENIMIENTO' => {
+  const s = String(e || '').toUpperCase()
+  if (s === 'OPERANDO' || s === 'FUERA_SERVICIO' || s === 'FUERA SERVICIO' || s === 'MANTENIMIENTO') {
+    if (s === 'FUERA SERVICIO') return 'FUERA_SERVICIO'
+    return s as any
+  }
+  return 'OPERANDO'
+}
+
+// Todas las máquinas reciben efectivo (fijo). Los medios digitales (veos/datafono/cupos)
+// se leen del JSON si ya están configurados; si no, quedan desactivados.
+// Adicionalmente se leen los seriales alfanuméricos de cada dispositivo de cobro.
+const normalizarMedios = (mp: any): MediosPago => {
+  const m = mp ?? {}
+  return {
+    efectivo: true,
+    veos: !!m.veos || !!m.nequi || !!m.daviplata,
+    datafono: !!m.datafono || !!m.tarjeta,
+    cupos: !!m.cupos,
+    serialVeos: m.serialVeos ?? undefined,
+    serialDatafono: m.serialDatafono ?? undefined,
+    serialCupos: m.serialCupos ?? undefined,
+    serialEfectivoMonedero: m.serialEfectivoMonedero ?? undefined,
+    serialEfectivoBilletero: m.serialEfectivoBilletero ?? undefined,
+  }
+}
+
+// Componente de serial de un dispositivo de cobro.
+// Se muestra SOLO cuando el medio de pago está activo (ya sea por `activo`
+// directo, o bien observando el checkbox `dependeDe`).
+// El serial es OPCIONAL por ahora (migración de máquinas existentes sin serial),
+// pero se persiste en la BD para no perderlo.
+const SerialMedioPago = ({ name, label, placeholder, activo, dependeDe }: { name: string; label: string; placeholder: string; activo?: boolean; dependeDe?: string }) => {
+  const form = Form.useFormInstance()
+  const watchValor = Form.useWatch(['mediosPago', dependeDe ?? ''], form)
+  const verificar = dependeDe ? (watchValor || false) : (activo ?? false)
+  if (!verificar) return null
+  return (
+    <Form.Item
+      name={['mediosPago', name]}
+      label={label}
+      style={{ marginBottom: 8 }}
+      extra="Opcional. Si se desactiva este medio se eliminará este serial."
+    >
+      <Input placeholder={placeholder} maxLength={60} style={{ textTransform: 'uppercase' }} />
+    </Form.Item>
+  )
+}
+
+// Checkbox de medio de pago: el valor se registra en el form mediante un
+// Form.Item OCULTO (para que useWatch, validateFields y el submit siempre lo
+// tengan en cuenta), y el checkbox visible está controlado manualmente.
+// - Al ACTIVAR un medio: cambia de inmediato.
+// - Al DESACTIVAR un medio que YA tiene serial: se muestra un modal ANTES de
+//   cambiar; solo si el usuario confirma se desactiva y se borra el serial.
+// Si cancela, el checkbox queda intacto.
+const CheckboxMedio = ({ campo, serialCampo, children }: { campo: string; serialCampo: string; children: ReactNode }) => {
+  const form = Form.useFormInstance()
+  const activo = Form.useWatch(['mediosPago', campo], form) || false
+
+  const handleChange = (e: { target: { checked: boolean } }) => {
+    const nuevo = e.target.checked
+    // Activación -> aplicar de inmediato
+    if (nuevo) {
+      form.setFieldValue(['mediosPago', campo], true)
+      return
+    }
+    // Se intenta desactivar: si hay serial, pedir confirmación antes
+    const serialActual = form.getFieldValue(['mediosPago', serialCampo])
+    if (serialActual && String(serialActual).trim() !== '') {
+      Modal.confirm({
+        title: 'Desactivar medio de pago',
+        content: `Este medio tiene el serial "${String(serialActual).toUpperCase()}" asignado. Al desactivarlo se eliminará ese serial de la máquina. ¿Desea continuar?`,
+        okText: 'Sí, desactivar',
+        okType: 'danger',
+        cancelText: 'Cancelar',
+        onOk: () => {
+          form.setFieldValue(['mediosPago', campo], false)
+          form.setFieldValue(['mediosPago', serialCampo], undefined)
+        },
+        onCancel: () => {
+          // Se mantiene activo y conserva su serial
+          form.setFieldValue(['mediosPago', campo], true)
+        },
+      })
+      return
+    }
+    // Desactivar sin serial: cambio directo
+    form.setFieldValue(['mediosPago', campo], false)
+  }
+
+  return (
+    <>
+      {/* Registra el campo en el form para que useWatch / submit lo conserven */}
+      <Form.Item name={['mediosPago', campo]} valuePropName="checked" hidden initialValue={false} />
+      <Checkbox checked={activo} onChange={handleChange}>{children}</Checkbox>
+    </>
+  )
+}
+
+const Maquinas = () => {
+  const [data, setData] = useState<Maquina[]>([])
+  const [clientes, setClientes] = useState<any[]>([])
+  const [operadores, setOperadores] = useState<any[]>([])
+  const [productos, setProductos] = useState<any[]>([])
+  const [fetching, setFetching] = useState(true)
+  const [initialLoading, setInitialLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState<Maquina | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [espirales, setEspirales] = useState<Espiral[]>([])
+  const [botones, setBotones] = useState<BotonNRQ[]>([])
+  const perm = usePermissions('maquinas')
+
+  const [openEspModal, setOpenEspModal] = useState(false)
+  const [editEspIdx, setEditEspIdx] = useState<number | null>(null)
+  const [formEsp] = Form.useForm()
+
+  const [openBtnModal, setOpenBtnModal] = useState(false)
+  const [editBtnIdx, setEditBtnIdx] = useState<number | null>(null)
+  const [formBtn] = Form.useForm()
+
+  const [rend, setRend] = useState<{ materiasPrimas: any[]; dosificados: any[]; maquina?: any } | null>(null)
+
+  const loadData = useCallback(async () => {
+    setFetching(true)
+    try {
+      const [maquinasRes, clientesRes, operadoresRes, productosRes] = await Promise.all([
+        apiService.get('/maquinas?include=cliente,operador'),
+        apiService.get('/clientes'),
+        apiService.get('/operadores'),
+        apiService.get('/productos?limit=2000&take=2000'),
+      ])
+
+      const maquinasList = Array.isArray(maquinasRes) ? maquinasRes : (maquinasRes?.data || [])
+      const clientesList = Array.isArray(clientesRes) ? clientesRes : (clientesRes?.data || [])
+      const operadoresList = Array.isArray(operadoresRes) ? operadoresRes : (operadoresRes?.data || [])
+      const productosList = Array.isArray(productosRes) ? productosRes : (productosRes?.data || [])
+
+      const maquinasMapeadas: Maquina[] = maquinasList.map((m: any) => ({
+        id: m.idMaquina ?? m.id,
+        serial: m.serial ?? '',
+        marca: m.marca ?? '',
+        tipo: normalizarTipo(m.tipo ?? m.Tipo_Maquina),
+        clienteId: m.idCliente ?? m.clienteId,
+        clienteNombre: m.cliente?.razonSocial ?? m.clienteNombre ?? '',
+        operadorId: m.idOperador ?? m.operadorId,
+        operadorNombre: m.operador?.nombreCompleto ?? m.operador?.usuario?.nombre ?? m.operadorNombre ?? '',
+        zona: m.ubicacionEsp ?? m.zona ?? '',
+        base: Number(m.base ?? 0),
+        estado: normalizarEstado(m.estado ?? m.estado_operacion),
+        mediosPago: normalizarMedios(m.mediosPago ?? m.Medios_Pago),
+        espirales: Array.isArray(m.mapaMateriaPrima)
+          ? m.mapaMateriaPrima.map((e: any) => ({
+              id: e.idMapaMp ?? Math.random(),
+              espiral: e.espiralCodigo ?? '',
+              capacidad_max: e.capacidadMax ?? 0,
+              cantidad_actual: Number(e.capacidadActual ?? e.cantidad_actual ?? 0),
+              productoId: e.idProducto,
+              productoNombre: e.producto?.nombreProducto ?? e.producto?.nombre ?? '',
+              precio_venta_cliente: e.precioVentaCliente,
+            }))
+          : (m.espirales ?? genEspiralesVacio()),
+        botonesNRQ: Array.isArray(m.mapaCafeNrq)
+          ? m.mapaCafeNrq.map((b: any) => ({
+              id: b.idMapaNrq ?? Math.random(),
+              boton: b.opcionBoton ?? '',
+              productoId: b.idProdTerm,
+              productoNombre: b.productoTerminado?.nombreProducto ?? b.productoTerminado?.nombre ?? '',
+              precio_venta_cliente: b.precioVentaCliente,
+            }))
+          : (m.botonesNRQ ?? genBotonesVacio()),
+      }))
+
+      setData(maquinasMapeadas)
+      setClientes(clientesList)
+      setOperadores(operadoresList)
+      setProductos(productosList)
+    } catch (err: any) {
+      message.error(err?.response?.data?.message || 'Error al cargar datos')
+    } finally {
+      setFetching(false)
+      setInitialLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadData()
+  }, [loadData])
+
+  const filtered = useMemo(() => {
+    if (!search) return data
+    const s = search.toLowerCase()
+    return data.filter((c) => c.serial.toLowerCase().includes(s) || c.marca.toLowerCase().includes(s) || c.clienteNombre.toLowerCase().includes(s))
+  }, [data, search])
+
+  const resetDrawer = () => {
+    setEditing(null)
+    setEspirales([])
+    setBotones([])
+    setRend(null)
+    setOpen(false)
+  }
+
+  const loadRendimiento = async (id: number) => {
+    try {
+      const rd: any = await apiService.get(`/maquinas/${id}/rendimiento`)
+      const rdata = rd?.data ?? rd ?? {}
+      setRend({ materiasPrimas: rdata.materiasPrimas ?? [], dosificados: rdata.dosificados ?? [], maquina: rdata.maquina })
+    } catch {
+      setRend({ materiasPrimas: [], dosificados: [] })
+    }
+  }
+
+  const openEdit = async (m: Maquina) => {
+    setEditing(m)
+    setEspirales([])
+    setBotones([])
+    setRend(null)
+    setOpen(true)
+    try {
+      // Cargar detalle completo (mapa espirales/botones + precio de venta por cliente)
+      const det: any = await apiService.get(`/maquinas/${m.id}`)
+      const info: any = det?.data ?? det ?? {}
+      const esp = info.mapaMateriaPrima ?? []
+      const bot = info.mapaCafeNrq ?? []
+      setEspirales(
+        esp.map((e: any) => ({
+          id: e.idMapaMp ?? Math.random(),
+          espiral: e.espiralCodigo ?? '',
+          capacidad_max: e.capacidadMax ?? 0,
+          cantidad_actual: Number(e.capacidadActual ?? e.cantidad_actual ?? 0),
+          productoId: e.idProducto,
+          productoNombre: e.producto?.nombreProducto ?? e.producto?.nombre ?? '',
+          precio_venta_cliente: e.precioVentaCliente,
+        })),
+      )
+      setBotones(
+        bot.map((b: any) => ({
+          id: b.idMapaNrq ?? Math.random(),
+          boton: b.opcionBoton ?? '',
+          productoId: b.idProdTerm,
+          productoNombre: b.productoTerminado?.nombreProducto ?? b.productoTerminado?.nombre ?? '',
+          precio_venta_cliente: b.precioVentaCliente,
+        })),
+      )
+      if (m.tipo === 'CAFE') {
+        loadRendimiento(m.id)
+      }
+    } catch {
+      // Si falla el detalle, mantener lo que venga en la lista
+      setEspirales(m.espirales ? [...m.espirales] : [])
+      setBotones(m.botonesNRQ ? [...m.botonesNRQ] : [])
+    }
+  }
+  const openCreate = () => {
+    setEditing(null)
+    setEspirales([])
+    setBotones([])
+    setOpen(true)
+  }
+
+  const handleSubmit = async (values: any) => {
+    setLoading(true)
+    try {
+      const body: any = {
+        serial: values.serial,
+        marca: values.marca,
+        tipo: values.tipo,
+        idCliente: values.clienteId ?? null,
+        idOperador: values.operadorId ?? null,
+        ubicacionEsp: values.zona,
+        base: values.base ?? 0,
+        mediosPago: values.mediosPago ? { ...values.mediosPago, efectivo: true } : undefined,
+        estado: values.estado ? values.estado !== 'FUERA_SERVICIO' && values.estado !== 'FUERA SERVICIO' : true,
+      }
+
+      let savedMaquina: any
+      if (editing) {
+        savedMaquina = await apiService.patch(`/maquinas/${editing.id}`, body)
+        message.success('Máquina actualizada')
+      } else {
+        savedMaquina = await apiService.post('/maquinas', body)
+        message.success('Máquina creada')
+      }
+
+      // En máquinas CAFÉ existentes, insumos y botones ya se guardan en vivo
+      // (al agregar/quitar). Solo se re-persisten aquí para máquinas NO-CAFÉ
+      // (donde se guardan al cerrar) y para máquinas CAFÉ recién creadas
+      // (que aún no tienen id para guardarse en vivo).
+      const cafeExistente = editing?.tipo === 'CAFE' && editing?.id != null
+      if ((!cafeExistente) && (espirales.length > 0 || botones.length > 0)) {
+        const mid = savedMaquina?.idMaquina ?? savedMaquina?.id ?? editing?.id
+        const fallos: string[] = []
+        try {
+          if (espirales.length > 0) {
+            await apiService.post(`/maquinas/${mid}/espirales`, { espirales })
+          }
+          if (botones.length > 0) {
+            await apiService.post(`/maquinas/${mid}/botones`, { botones })
+          }
+        } catch (err: any) {
+          fallos.push(String(err?.response?.data?.message || err?.message || 'error desconocido'))
+        }
+        if (fallos.length) {
+          message.warning(`La máquina se guardó, pero no se pudieron persistir espirales/botones: ${fallos.join('; ')}`)
+        }
+      }
+
+      await loadData()
+      resetDrawer()
+    } catch (err: any) {
+      message.error(err?.response?.data?.message || 'Error al guardar máquina')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleDelete = async (id: number) => {
+    try {
+      await apiService.remove(`/maquinas/${id}`)
+      setData(data.filter((c) => c.id !== id))
+      message.success('Máquina eliminada')
+    } catch (err: any) {
+      message.error(err?.response?.data?.message || 'Error al eliminar máquina')
+    }
+  }
+
+  const estadoColor = (e: string) => (e === 'OPERANDO' ? 'green' : e === 'MANTENIMIENTO' ? 'gold' : 'red')
+  const tipoColor = (t: string) => (t === 'SNACK' ? 'orange' : t === 'BEBIDA' ? 'blue' : t === 'CAFE' ? 'purple' : 'cyan')
+
+  const openAddEspiral = () => {
+    setEditEspIdx(null)
+    formEsp.resetFields()
+    formEsp.setFieldsValue({
+      espiral: '',
+      productoId: undefined,
+      capacidad_max: 15,
+      cantidad_actual: 0,
+    })
+    setOpenEspModal(true)
+  }
+
+  const openEditEspiral = (idx: number) => {
+    const esp = espirales[idx]
+    setEditEspIdx(idx)
+    formEsp.setFieldsValue({
+      espiral: esp.espiral,
+      productoId: esp.productoId,
+      cantidad_actual: esp.cantidad_actual ?? 0,
+      capacidad_max: esp.capacidad_max,
+    })
+    setOpenEspModal(true)
+  }
+
+  const closeEspModal = () => {
+    setOpenEspModal(false)
+    setEditEspIdx(null)
+  }
+
+  const saveEspiral = async () => {
+    try {
+      const values = await formEsp.validateFields()
+      const prod = productos.find((p) => (p.idProducto ?? p.id) === values.productoId)
+      const prodName = prod?.nombreProducto ?? prod?.nombre
+      const esCafe = editing?.tipo === 'CAFE'
+      // En café no se pide código de espiral; se genera internamente (I01, I02…) con un secuencial único
+      const nextInsumo = (() => {
+        let maxN = 0
+        for (const e of espirales) {
+          const n = parseInt(String(e.espiral).replace(/\D/g, ''), 10) || 0
+          if (n > maxN) maxN = n
+        }
+        return String(maxN + 1).padStart(2, '0')
+      })()
+      const codEspiral = esCafe
+        ? `I${nextInsumo}`
+        : String(values.espiral).trim().toUpperCase()
+
+      let ns: Espiral[]
+      if (editEspIdx === null) {
+        const newId = Math.max(0, ...espirales.map((e) => e.id), 0) + 1
+        const nuevo: Espiral = {
+          id: newId,
+          espiral: codEspiral,
+          capacidad_max: Number(values.capacidad_max),
+          cantidad_actual: Number(values.cantidad_actual ?? 0),
+          productoId: values.productoId,
+          productoNombre: prodName,
+          precio_venta_cliente: undefined,
+        }
+        ns = [...espirales, nuevo]
+        message.success(esCafe ? 'Insumo agregado' : `Espiral ${nuevo.espiral} agregada`)
+      } else {
+        ns = [...espirales]
+        const original = ns[editEspIdx]
+        ns[editEspIdx] = {
+          ...original,
+          espiral: codEspiral,
+          capacidad_max: Number(values.capacidad_max),
+          cantidad_actual: Number(values.cantidad_actual ?? 0),
+          productoId: values.productoId,
+          productoNombre: prodName,
+          precio_venta_cliente: original?.precio_venta_cliente,
+        }
+        message.success(esCafe ? 'Insumo actualizado' : `Espiral ${ns[editEspIdx].espiral} actualizada`)
+      }
+
+      setEspirales(ns)
+      // Persistir a BD si la máquina ya existe
+      if (editing?.id) {
+        try {
+          await apiService.post(`/maquinas/${editing.id}/espirales`, { espirales: ns })
+          if (editing.tipo === 'CAFE') loadRendimiento(editing.id)
+        } catch {
+          message.warning(esCafe ? 'El insumo quedó pendiente de guardar (verifica conexión y vuelve a Guardar la máquina)' : 'El espiral quedó pendiente de guardar (verifica conexión y vuelve a Guardar la máquina)')
+        }
+      }
+      closeEspModal()
+    } catch {}
+  }
+
+  const deleteEspiral = (idx: number) => {
+    const ns = [...espirales]
+    const removed = ns.splice(idx, 1)[0]
+    setEspirales(ns)
+    message.success(editing?.tipo === 'CAFE' ? 'Insumo quitado' : `Espiral ${removed.espiral} eliminada`)
+    if (editing?.id && editing.tipo === 'CAFE') {
+      apiService.post(`/maquinas/${editing.id}/espirales`, { espirales: ns }).then(() => loadRendimiento(editing.id)).catch(() => {})
+    }
+  }
+
+  const openAddBoton = () => {
+    setEditBtnIdx(null)
+    formBtn.resetFields()
+    formBtn.setFieldsValue({
+      boton: '',
+      productoId: undefined,
+    })
+    setOpenBtnModal(true)
+  }
+
+  const openEditBoton = (idx: number) => {
+    const b = botones[idx]
+    setEditBtnIdx(idx)
+    formBtn.setFieldsValue({
+      boton: b.boton,
+      productoId: b.productoId,
+    })
+    setOpenBtnModal(true)
+  }
+
+  const closeBtnModal = () => {
+    setOpenBtnModal(false)
+    setEditBtnIdx(null)
+  }
+
+  const saveBoton = async () => {
+    try {
+      const values = await formBtn.validateFields()
+      const prod = productos.find((p) => (p.idProducto ?? p.id) === values.productoId)
+      const prodName = prod?.nombreProducto ?? prod?.nombre
+      let ns: BotonNRQ[]
+
+      if (editBtnIdx === null) {
+        const newId = Math.max(0, ...botones.map((b) => b.id), 0) + 1
+        const nuevo: BotonNRQ = {
+          id: newId,
+          boton: String(values.boton).trim().toUpperCase(),
+          productoId: values.productoId,
+          productoNombre: prodName,
+          precio_venta_cliente: undefined,
+        }
+        ns = [...botones, nuevo]
+        message.success(`Botón ${nuevo.boton} agregado`)
+      } else {
+        ns = [...botones]
+        ns[editBtnIdx] = {
+          ...ns[editBtnIdx],
+          boton: String(values.boton).trim().toUpperCase(),
+          productoId: values.productoId,
+          productoNombre: prodName,
+          precio_venta_cliente: ns[editBtnIdx]?.precio_venta_cliente,
+        }
+        message.success(`Botón ${ns[editBtnIdx].boton} actualizado`)
+      }
+      setBotones(ns)
+      // Persistir a BD si la máquina ya existe
+      if (editing?.id) {
+        try {
+          await apiService.post(`/maquinas/${editing.id}/botones`, { botones: ns })
+          if (editing.tipo === 'CAFE') loadRendimiento(editing.id)
+        } catch {
+          message.warning('El botón quedó pendiente de guardar (verifica conexión y vuelve a Guardar la máquina)')
+        }
+      }
+      closeBtnModal()
+    } catch {}
+  }
+
+  const deleteBoton = (idx: number) => {
+    const ns = [...botones]
+    const removed = ns.splice(idx, 1)[0]
+    setBotones(ns)
+    message.success(`Botón ${removed.boton} eliminado`)
+    if (editing?.id && editing.tipo === 'CAFE') {
+      apiService.post(`/maquinas/${editing.id}/botones`, { botones: ns }).then(() => loadRendimiento(editing.id)).catch(() => {})
+    }
+  }
+
+  const columns = [
+    { title: 'Serial', dataIndex: 'serial', key: 's', render: (v: string) => <code>{v}</code> },
+    { title: 'Marca', dataIndex: 'marca', key: 'm' },
+    { title: 'Tipo', dataIndex: 'tipo', key: 't', render: (v: string) => <Tag color={tipoColor(v)}>{v}</Tag> },
+    { title: 'Cliente', dataIndex: 'clienteNombre', key: 'c', render: (v: string) => <Tag color="blue">{v}</Tag> },
+    { title: 'Operador', dataIndex: 'operadorNombre', key: 'o' },
+    { title: 'Zona', dataIndex: 'zona', key: 'z' },
+    {
+      title: 'Base ($)',
+      key: 'base',
+      dataIndex: 'base',
+      render: (v: number) => <strong style={{ color: '#cf1322' }}>${(v || 0).toLocaleString('es-CO', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}</strong>,
+    },
+    {
+      title: 'Estado',
+      key: 'e',
+      dataIndex: 'estado',
+      render: (v: string) => (
+        <Badge status={v === 'OPERANDO' ? 'success' : v === 'MANTENIMIENTO' ? 'warning' : 'error'} text={<Tag color={estadoColor(v)}>{v}</Tag>} />
+      ),
+    },
+    {
+      title: 'Acciones',
+      key: 'acc',
+      render: (_: any, r: Maquina) => (
+        <Space>
+          {perm.editar && <Button type="link" icon={<EditOutlined />} onClick={() => openEdit(r)}>Editar</Button>}
+          {perm.eliminar && (
+            <Popconfirm title="¿Eliminar máquina?" onConfirm={() => handleDelete(r.id)}>
+              <Button type="link" danger icon={<DeleteOutlined />}>Eliminar</Button>
+            </Popconfirm>
+          )}
+        </Space>
+      ),
+    },
+  ]
+
+  const totalEspirales = espirales.length
+  const totalBotones = botones.length
+
+  // Solo productos DOSIFICADOS (receta café) para asignar a los botones NRQ.
+  const productosDosificados = useMemo(
+    () => productos.filter((p: any) => {
+      const t = String(p?.tipoProducto ?? p?.Tipo_Producto ?? p?.tipo ?? '').toUpperCase()
+      return t.includes('DOSIF') || t === 'DOSIFICADO'
+    }),
+    [productos],
+  )
+
+  const nombreProveedorProducto = (p: any) => {
+    if (!p) return ''
+    const prov = p.proveedor ?? p.Proveedor ?? null
+    return (prov?.razonSocial ?? prov?.razon_social ?? prov?.nombre ?? '')
+  }
+
+  const descargarPDFMaquina = () => {
+    if (!editing) {
+      message.warning('Primero debe abrir la máquina en edición para descargar su información')
+      return
+    }
+    const esCafe = editing.tipo === 'CAFE'
+    const mp: MediosPago = editing.mediosPago ?? ({} as MediosPago)
+    const doc = new jsPDF()
+    const pageWidth = doc.internal.pageSize.getWidth()
+    const margin = 16
+    const gris = 90
+
+    // ---- Encabezado sobrio ----
+    doc.setFontSize(15)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(33, 37, 41)
+    doc.text('FICHA DE MÁQUINA VENDING', margin, 17)
+    doc.setFontSize(8.5)
+    doc.setFont('helvetica', 'normal')
+    doc.setTextColor(gris)
+    const fecha = new Date().toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+    doc.text(`Generado: ${fecha}`, pageWidth - margin, 17, { align: 'right' })
+    doc.setDrawColor(180, 180, 180)
+    doc.setLineWidth(0.3)
+    doc.line(margin, 21, pageWidth - margin, 21)
+
+    let y = 26
+
+    // ---- Resumen compacto: datos básicos + asignaciones ----
+    const filasDatos = [
+      ['Serial', editing.serial || '—'],
+      ['Marca', editing.marca || '—'],
+      ['Tipo', editing.tipo],
+      ['Estado', editing.estado],
+      ['Ubicación / Zona', editing.zona || '—'],
+      ['Base en Dinero ($)', editing.base ? editing.base.toLocaleString('es-CO') : '—'],
+      ['Cliente', editing.clienteNombre || 'Sin asignar'],
+      ['Operador a Cargo', editing.operadorNombre || 'Sin asignar'],
+    ]
+    doc.setFontSize(10.5)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(33, 37, 41)
+    doc.text('INFORMACIÓN GENERAL', margin, y)
+    doc.setFontSize(8)
+    y += 3.5
+    autoTable(doc, {
+      startY: y,
+      theme: 'plain',
+      styles: { fontSize: 8, cellPadding: { top: 1.2, right: 2, bottom: 1.2, left: 0 } },
+      columnStyles: { 0: { fontStyle: 'bold', textColor: [90, 90, 90], cellWidth: 55 }, 1: { textColor: [33, 37, 41] } },
+      margin: { left: margin, right: margin },
+      body: filasDatos,
+    })
+    y = (doc as any).lastAutoTable.finalY as number
+
+    // ---- Medios de pago (compacto) ----
+    const nombrarSerial = (label: string, activo: boolean, serial?: string) =>
+      activo ? `${label}: ${serial || 'sin serial'}` : null
+    const mediosActivos = [
+      nombrarSerial('Veos', !!mp.veos, mp.serialVeos),
+      nombrarSerial('Datafono', !!mp.datafono, mp.serialDatafono),
+      nombrarSerial('Cupos', !!mp.cupos, mp.serialCupos),
+      nombrarSerial('Monedero', true, mp.serialEfectivoMonedero),
+      nombrarSerial('Billetero', true, mp.serialEfectivoBilletero),
+    ].filter(Boolean) as string[]
+    const filasMedios = mediosActivos.length ? mediosActivos.map((m) => [m]) : [['Sin medios de pago digitales registrados']]
+
+    y += 6
+    doc.setFontSize(10.5)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(33, 37, 41)
+    doc.text('MEDIOS DE PAGO', margin, y)
+    doc.setFontSize(8)
+    y += 3.5
+    autoTable(doc, {
+      startY: y,
+      theme: 'plain',
+      styles: { fontSize: 8, cellPadding: { top: 1.2, right: 2, bottom: 1.2, left: 0 }, textColor: [33, 37, 41] },
+      margin: { left: margin, right: margin },
+      columnStyles: { 0: { cellWidth: 120 } },
+      body: filasMedios,
+    })
+    y = (doc as any).lastAutoTable.finalY as number
+
+    // ---- Mapa de la máquina ----
+    let tituloMapa = 'MAPA MP (ESPIRALES)'
+    let columnas: string[] = ['Espiral', 'Producto Asignado', 'Precio Venta', 'Capacidad Actual', 'Capacidad Máx.']
+    let filas: any[] = []
+
+    if (esCafe) {
+      tituloMapa = 'MAPA DE INSUMOS'
+      columnas = ['Espiral', 'Producto Asignado', 'Capacidad Actual', 'Capacidad Máx.']
+      filas = espirales.map((e) => [
+        e.espiral,
+        e.productoNombre || 'Sin asignar',
+        e.cantidad_actual ?? 0,
+        e.capacidad_max ?? 0,
+      ])
+      if (botones.length > 0) {
+        tituloMapa = 'MAPA DE INSUMOS + BOTONES NRQ'
+        columnas = ['Botón/Espiral', 'Producto Asignado', 'Precio Venta', 'Capacidad Actual', 'Capacidad Máx.']
+        const filasBotones = botones.map((b) => [
+          b.boton,
+          b.productoNombre || 'Sin asignar',
+          b.precio_venta_cliente ?? '—',
+          '—',
+          '—',
+        ])
+        filas = [...filasBotones, ...filas]
+      }
+    } else {
+      filas = espirales.map((e) => [
+        e.espiral,
+        e.productoNombre || 'Sin asignar',
+        e.precio_venta_cliente !== undefined && e.precio_venta_cliente !== null
+          ? `$${Number(e.precio_venta_cliente).toLocaleString('es-CO')}`
+          : '—',
+        e.cantidad_actual ?? 0,
+        e.capacidad_max ?? 0,
+      ])
+    }
+
+    doc.setFontSize(10.5)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(33, 37, 41)
+    doc.text(tituloMapa, margin, y + 6)
+    y += 9.5
+    autoTable(doc, {
+      startY: y,
+      theme: 'striped',
+      headStyles: { fillColor: [52, 58, 64], textColor: 255 },
+      styles: { fontSize: 8.5, cellPadding: 2 },
+      margin: { left: margin, right: margin },
+      head: [columnas],
+      body: filas.length ? filas : [['No hay productos asignados', '', '', '', '']],
+      columnStyles: esCafe && botones.length === 0 ? {} : { 0: { cellWidth: 30 } },
+    })
+
+    const fileName = `Maquina_${String(editing.serial || editing.id).replace(/[^A-Za-z0-9_-]/g, '_')}.pdf`
+    doc.save(fileName)
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+        <Title level={4} style={{ margin: 0 }}>Máquinas Vending</Title>
+        <Space>
+          <Button icon={<ReloadOutlined spin={fetching} />} onClick={loadData}>Recargar</Button>
+          <Input allowClear prefix={<SearchOutlined />} placeholder="Buscar serial, marca..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 320 }} />
+          {perm.crear && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>Nueva Máquina</Button>}
+        </Space>
+      </div>
+      <Spin spinning={initialLoading}>
+        <Table rowKey="id" dataSource={filtered} columns={columns} pagination={{ pageSize: 10, showTotal: (t) => `Total ${t} máquinas` }} scroll={{ x: 1100 }} />
+      </Spin>
+      <ModalDrawer
+        title={editing ? 'Editar Máquina' : 'Nueva Máquina'} open={open} onClose={resetDrawer} onSubmit={handleSubmit}
+        initialValues={editing || { tipo: 'SNACK', estado: 'OPERANDO' }} loading={loading} width={920}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <Form.Item name="tipo" label="Tipo Máquina" rules={[{ required: true }]} initialValue="SNACK" style={{ flex: 1, minWidth: 0 }}>
+            <Select>
+              <Option value="SNACK">🥨 SNACK (Sólidos)</Option>
+              <Option value="BEBIDA">🥤 BEBIDA (Líquidos)</Option>
+              <Option value="COMBINADA">🧃 COMBINADA</Option>
+              <Option value="CAFE">☕ CAFÉ (Dosificadora)</Option>
+            </Select>
+          </Form.Item>
+          {editing && (
+            <Form.Item label="&nbsp;" style={{ flexShrink: 0, marginBottom: 24 }}>
+              <Button icon={<DownloadOutlined />} onClick={descargarPDFMaquina}>Descargar PDF</Button>
+            </Form.Item>
+          )}
+        </div>
+        <Tabs
+          items={[
+            {
+              key: 'GENERAL',
+              label: '📋 Datos Básicos',
+              children: (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <Form.Item name="serial" label="Serial" rules={[{ required: true }]}><Input prefix={<DesktopOutlined />} /></Form.Item>
+                    <Form.Item name="marca" label="Marca" rules={[{ required: true }]}><Input /></Form.Item>
+                  </div>
+                  <Form.Item name="zona" label="Ubicación / Zona" rules={[{ required: true }]}><Input placeholder="Ej: Piso 3 - Cafetería" /></Form.Item>
+                  <Form.Item name="base" label="Base en Dinero ($)" extra="Monto base que maneja esta máquina">
+                    <InputNumber prefix="$" min={0} precision={2} style={{ width: '100%' }} placeholder="0" />
+                  </Form.Item>
+                </>
+              ),
+            },
+            {
+              key: 'ASIG',
+              label: '👥 Asignaciones',
+              children: (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <Form.Item name="clienteId" label="Cliente" extra={editing ? 'Puede dejarse vacío para desasignar la máquina (no operando).' : 'Opcional al crear.'}>
+                      <Select placeholder="Seleccione cliente" allowClear>
+                        {clientes.map((c) => <Option key={c.idCliente ?? c.id} value={c.idCliente ?? c.id}>{c.razonSocial ?? c.nombre}</Option>)}
+                      </Select>
+                    </Form.Item>
+                    <Form.Item name="operadorId" label="Operador a Cargo" extra={editing ? 'Puede dejarse vacío para desasignar la máquina.' : 'Opcional al crear.'}>
+                      <Select placeholder="Seleccione operador" allowClear>
+                        {operadores.map((o) => <Option key={o.idOperador ?? o.id} value={o.idOperador ?? o.id}>{o.nombreCompleto ?? o.usuario?.nombre ?? o.nombre}</Option>)}
+                      </Select>
+                    </Form.Item>
+                  </div>
+                </>
+              ),
+            },
+            {
+              key: 'MEDIOS',
+              label: '💳 Medios de Pago',
+              children: (
+                <>
+                  <div style={{ color: '#666', fontSize: 12, marginBottom: 12 }}>
+                    Seleccione los medios de pago que maneja esta máquina. Todas las máquinas reciben <strong>efectivo</strong>.
+                    <br />
+                    Al activar un medio puede registrar el <em>serial</em> del dispositivo de cobro. El serial es opcional por ahora y se conserva en la base de datos.
+                  </div>
+
+                  <CheckboxMedio campo="veos" serialCampo="serialVeos">
+                    <b>Veos</b>
+                  </CheckboxMedio>
+                  <SerialMedioPago name="serialVeos" label="Serial del dispositivo Veos" placeholder="Ej: VEO-000-123" dependeDe="veos" />
+
+                  <CheckboxMedio campo="datafono" serialCampo="serialDatafono">
+                    <b>Datafono</b>
+                  </CheckboxMedio>
+                  <SerialMedioPago name="serialDatafono" label="Serial del Datafono" placeholder="Ej: DAT-000-123" dependeDe="datafono" />
+
+                  <CheckboxMedio campo="cupos" serialCampo="serialCupos">
+                    <b>Cupos</b>
+                  </CheckboxMedio>
+                  <SerialMedioPago name="serialCupos" label="Serial del dispositivo de Cupos" placeholder="Ej: CUP-000-123" dependeDe="cupos" />
+
+                  <Form.Item name={['mediosPago', 'efectivo']} valuePropName="checked" initialValue={true}>
+                    <Checkbox disabled checked>Efectivo (siempre activo)</Checkbox>
+                  </Form.Item>
+                  <div style={{ color: '#666', fontSize: 12, marginBottom: 8 }}>
+                    El efectivo siempre está activo. Registre los seriales de sus dispositivos de cobro en efectivo.
+                  </div>
+                  <SerialMedioPago name="serialEfectivoMonedero" label="Serial del Monedero (efectivo)" placeholder="Ej: MON-000-123" activo={true} />
+                  <SerialMedioPago name="serialEfectivoBilletero" label="Serial del Billetero (efectivo)" placeholder="Ej: BIL-000-123" activo={true} />
+                </>
+              ),
+            },
+            ...[
+              (() => {
+                const esCafe = editing?.tipo === 'CAFE'
+                return {
+                  key: 'MAPA',
+                  label: esCafe
+                    ? `🧺 Mapa de Insumos ${totalEspirales > 0 ? `· ${totalEspirales}` : ''}`
+                    : `🗂️ Mapa MP (Espirales) ${totalEspirales > 0 ? `· ${totalEspirales}` : ''}`,
+                  children: (
+                    <Card
+                      size="small"
+                      title={esCafe
+                        ? 'Insumos de la máquina de café — los productos (materia prima) que se le asignan'
+                        : 'Configurar espirales y productos — defínelas una a una'}
+                      type="inner"
+                      extra={
+                        <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openAddEspiral}>
+                          {esCafe ? 'Agregar Insumo' : 'Agregar Espiral'}
+                        </Button>
+                      }
+                    >
+                      <Table
+                        size="small"
+                        rowKey="id"
+                        dataSource={espirales}
+                        pagination={false}
+                        locale={{ emptyText: esCafe ? 'Sin insumos asignados. Clic en "Agregar Insumo" para asignar un producto.' : 'Sin espirales asignadas. Clic en "Agregar Espiral" para crear una.' }}
+                        columns={[
+                          ...(esCafe
+                            ? []
+                            : [
+                                {
+                                  title: 'Espiral',
+                                  dataIndex: 'espiral',
+                                  width: 100,
+                                  render: (v: string) => <Tag color="blue" style={{ fontFamily: 'monospace' }}>{v}</Tag>,
+                                },
+                              ]),
+                          {
+                            title: esCafe ? 'Insumo Asignado' : 'Producto Asignado',
+                            dataIndex: 'productoNombre',
+                            render: (v: string) => v ? <span>{v}</span> : <Tag color="default">Sin asignar</Tag>,
+                          },
+                          {
+                            title: 'Precio Venta',
+                            dataIndex: 'precio_venta_cliente',
+                            width: 120,
+                            align: 'right',
+                            render: (v: number) =>
+                              v != null && !isNaN(v) ? (
+                                <b style={{ color: '#1677ff' }}>${Number(v).toLocaleString('es-CO')}</b>
+                              ) : (
+                                <Tag color="gold">Sin precio</Tag>
+                              ),
+                          },
+                          {
+                            title: 'Capacidad Actual',
+                            dataIndex: 'cantidad_actual',
+                            width: 130,
+                            align: 'right',
+                            render: (v: number, r: Espiral) => {
+                              const val = v ?? 0
+                              const max = r.capacidad_max ?? 1
+                              const pct = Math.min(100, Math.round((val / max) * 100))
+                              return (
+                                <Space>
+                                  <b>{val}</b>
+                                  <Tag color={val === 0 ? 'red' : pct > 50 ? 'green' : 'gold'}>
+                                    {pct}%
+                                  </Tag>
+                                </Space>
+                              )
+                            },
+                          },
+                          {
+                            title: 'Capacidad Máx.',
+                            dataIndex: 'capacidad_max',
+                            width: 120,
+                            align: 'right',
+                            render: (v: number) => <span>{v ?? 0}</span>,
+                          },
+                          {
+                            title: 'Acciones',
+                            key: 'acc',
+                            width: 140,
+                            render: (_: any, r: Espiral, i: number) => (
+                              <Space size={4}>
+                                <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEditEspiral(i)}>
+                                  Editar
+                                </Button>
+                                <Popconfirm title={esCafe ? '¿Quitar este insumo?' : `¿Eliminar espiral ${r.espiral}?`} onConfirm={() => deleteEspiral(i)}>
+                                  <Button size="small" type="link" danger icon={<DeleteOutlined />}>
+                                    Quitar
+                                  </Button>
+                                </Popconfirm>
+                              </Space>
+                            ),
+                          },
+                        ]}
+                      />
+                    </Card>
+                  ),
+                }
+              })(),
+              ...(editing?.tipo === 'CAFE'
+                ? [
+                    {
+                      key: 'NRQ',
+                    label: `🔘 Mapa NRQ (Botones Café) ${totalBotones > 0 ? `· ${totalBotones}` : ''}`,
+                    children: (
+                      <>
+                      <Card
+                        size="small"
+                        title="Configurar botones dosificadora — defínelos uno a uno"
+                        type="inner"
+                        extra={
+                          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openAddBoton}>
+                            Agregar Botón
+                          </Button>
+                        }
+                      >
+                        <Table
+                          size="small"
+                          rowKey="id"
+                          dataSource={botones}
+                          pagination={false}
+                          locale={{ emptyText: 'Sin botones asignados. Clic en "Agregar Botón" para crear uno.' }}
+                          columns={[
+                            {
+                              title: 'Botón',
+                              dataIndex: 'boton',
+                              width: 120,
+                              render: (v: string) => <Tag color="purple" style={{ fontFamily: 'monospace' }}>{v}</Tag>,
+                            },
+                            {
+                              title: 'Producto Dosificado',
+                              dataIndex: 'productoNombre',
+                              render: (v: string) => v ? <span>{v}</span> : <Tag color="default">Sin asignar</Tag>,
+                            },
+                            {
+                              title: 'Precio Venta',
+                              dataIndex: 'precio_venta_cliente',
+                              width: 120,
+                              align: 'right',
+                              render: (v: number) =>
+                                v != null && !isNaN(v) ? (
+                                  <b style={{ color: '#1677ff' }}>${Number(v).toLocaleString('es-CO')}</b>
+                                ) : (
+                                  <Tag color="gold">Sin precio</Tag>
+                                ),
+                            },
+                            {
+                              title: 'Acciones',
+                              key: 'acc',
+                              width: 140,
+                              render: (_: any, r: BotonNRQ, i: number) => (
+                                <Space size={4}>
+                                  <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEditBoton(i)}>
+                                    Editar
+                                  </Button>
+                                  <Popconfirm title={`¿Eliminar botón ${r.boton}?`} onConfirm={() => deleteBoton(i)}>
+                                    <Button size="small" type="link" danger icon={<DeleteOutlined />}>
+                                      Quitar
+                                    </Button>
+                                  </Popconfirm>
+                                </Space>
+                              ),
+                            },
+                          ]}
+                        />
+                      </Card>
+                      <Card
+                        size="small"
+                        title="📈 Rendimiento de Producción (tazas servibles según los insumos asignados)"
+                        type="inner"
+                        style={{ marginTop: 12 }}
+                        extra={
+                          rend ? <Tag color="green">Actualizado</Tag> : <Tag color="default">Requiere guardar</Tag>
+                        }
+                      >
+                        {rend && rend.dosificados.length > 0 ? (
+                          <Table
+                            size="small"
+                            rowKey="idMapaNrq"
+                            dataSource={rend.dosificados}
+                            pagination={false}
+                            columns={[
+                              {
+                                title: 'Botón',
+                                dataIndex: 'boton',
+                                width: 90,
+                                render: (v: string) => <Tag color="purple" style={{ fontFamily: 'monospace' }}>{v}</Tag>,
+                              },
+                              {
+                                title: 'Dosificado',
+                                dataIndex: 'nombre',
+                                render: (v: string) => (v ? <strong>{v}</strong> : <Tag color="default">Sin asignar</Tag>),
+                              },
+                              {
+                                title: 'Tazas posibles',
+                                dataIndex: 'tazasPosibles',
+                                width: 130,
+                                align: 'right',
+                                render: (v: number) => <b style={{ color: '#1677ff' }}>{v.toLocaleString('es-CO')} 🥤</b>,
+                              },
+                              {
+                                title: 'Factor limitante',
+                                key: 'limitante',
+                                render: (_, r) =>
+                                  r.limitante ? <Tag color="gold">Falta: {r.limitante}</Tag> : <Tag color="green">Sin restricción</Tag>,
+                              },
+                              {
+                                title: 'Ingredientes por servicio',
+                                key: 'ing',
+                                render: (_, r) => (
+                                  <Space wrap size={4}>
+                                    {r.ingredientes && r.ingredientes.length > 0
+                                      ? r.ingredientes.map((ing: any, i: number) => (
+                                          <Tag key={i} color={ing.tazasPosibles === 0 ? 'red' : ing.tipoCafe ? 'geekblue' : 'blue'} title={`$ ${(ing.costoPorTaza ?? 0).toLocaleString('es-CO')}/taza`}>
+                                            {ing.dosis} {ing.unidad} {ing.nombre}
+                                            {ing.tipoCafe ? ` (${ing.tipoCafe === 'SOLUBLE' ? 'soluble·2g' : 'grano·8g'})` : ''}
+                                            {ing.tazasPosibles === 0 ? ' (sin MP)' : ''}
+                                          </Tag>
+                                        ))
+                                      : <Tag color="default">Sin receta</Tag>}
+                                  </Space>
+                                ),
+                              },
+                              {
+                                title: 'Costo / taza',
+                                dataIndex: 'costoPorTaza',
+                                width: 110,
+                                align: 'right',
+                                render: (v: number) => (v != null && !isNaN(v) ? <span>$ {v.toLocaleString('es-CO')}</span> : <Tag color="default">N/D</Tag>),
+                              },
+                              {
+                                title: 'Precio venta',
+                                dataIndex: 'precioVenta',
+                                width: 110,
+                                align: 'right',
+                                render: (v: number) => (v != null && !isNaN(v) ? <b style={{ color: '#1677ff' }}>$ {v.toLocaleString('es-CO')}</b> : <Tag color="gold">Sin precio</Tag>),
+                              },
+                              {
+                                title: 'Margen',
+                                dataIndex: 'margen',
+                                width: 100,
+                                align: 'right',
+                                render: (v: number) =>
+                                  v != null && !isNaN(v) ? <Tag color={v < 20 ? 'red' : v < 35 ? 'gold' : 'green'}>{v.toFixed(1)}%</Tag> : <Tag color="default">—</Tag>,
+                              },
+                            ]}
+                          />
+                        ) : (
+                          <Tag style={{ display: 'block' }}>Asigne los botones y guarde (o ajuste la cantidad actual de los insumos en "Mapa de Insumos") para ver el cálculo de tazas.</Tag>
+                        )}
+                      </Card>
+                      <Card
+                        size="small"
+                        title="🗂️ Resumen de Insumos (cantidad → unidades → consumo de los botones)"
+                        type="inner"
+                        style={{ marginTop: 12 }}
+                      >
+                        {rend && rend.materiasPrimas.length > 0 ? (
+                          <Table
+                            size="small"
+                            rowKey="idProducto"
+                            dataSource={rend.materiasPrimas}
+                            pagination={false}
+                            columns={[
+                              {
+                                title: 'Materia Prima',
+                                dataIndex: 'nombre',
+                                render: (v: string) => <strong>{v || '—'}</strong>,
+                              },
+                              { title: 'Proveedor', dataIndex: 'proveedor', width: 150, render: (v: string) => (v ? <Tag color="cyan">{v}</Tag> : <span style={{ color: '#999' }}>Sin proveedor</span>) },
+                              { title: 'Empaques', dataIndex: 'empaques', width: 90, align: 'right', render: (v: number) => <span>{v}</span> },
+                              { title: 'Und/empaque', dataIndex: 'equivalencia', width: 100, align: 'right', render: (v: number) => <span>{v?.toLocaleString?.('es-CO') ?? v}</span> },
+                              { title: 'Unidades disp.', dataIndex: 'unidadesDisponibles', width: 110, align: 'right', render: (v: number) => <span>{v?.toLocaleString?.('es-CO') ?? v} {rend?.materiasPrimas?.[0]?.unidad || ''}</span> },
+                              {
+                                title: 'Dosis/servicio (suma botones)',
+                                dataIndex: 'dosisPorServicioTotal',
+                                width: 150,
+                                align: 'right',
+                                render: (v: number) => <span>{v || 0}</span>,
+                              },
+                              {
+                                title: 'Servicios posibles',
+                                dataIndex: 'serviciosPosibles',
+                                width: 130,
+                                align: 'right',
+                                render: (v: number) => <b style={{ color: '#1677ff' }}>{v?.toLocaleString?.('es-CO') ?? v} 🥤</b>,
+                              },
+                              {
+                                title: 'Despacho',
+                                key: 'despacho',
+                                width: 120,
+                                align: 'center',
+                                render: (_, r) =>
+                                  r.serviciosPosibles > 20 ? (
+                                    <Tag color="green">OK</Tag>
+                                  ) : r.serviciosPosibles > 0 ? (
+                                    <Tag color="gold">Próximo a reponer</Tag>
+                                  ) : (
+                                    <Tag color="red">Despachar MP</Tag>
+                                  ),
+                              },
+                            ]}
+                          />
+                        ) : (
+                          <Tag style={{ display: 'block' }}>No hay insumos asignados en esta máquina café. Asigne los productos en "Capacidad Actual" del Mapa de Insumos para calcular el despacho.</Tag>
+                        )}
+                      </Card>
+                      </>
+                    ),
+                  },
+                ]
+              : []),
+            ],
+          ]}
+        />
+      </ModalDrawer>
+
+      <Drawer
+        title={(() => {
+          const esCafe = editing?.tipo === 'CAFE'
+          return editEspIdx === null
+            ? (esCafe ? 'Agregar Insumo' : 'Agregar Espiral')
+            : `Editar ${esCafe ? 'Insumo' : `Espiral ${editEspIdx !== null && espirales[editEspIdx] ? espirales[editEspIdx].espiral : ''}`}`
+        })()}
+        width={520}
+        open={openEspModal}
+        onClose={closeEspModal}
+        destroyOnClose={false}
+        maskClosable={false}
+        zIndex={1500}
+        extra={
+          <Space>
+            <Button onClick={closeEspModal}>Cancelar</Button>
+            <Button type="primary" onClick={saveEspiral}>Guardar</Button>
+          </Space>
+        }
+      >
+        <Spin spinning={false}>
+          <Form form={formEsp} layout="vertical" requiredMark={false} style={{ maxWidth: '100%' }} preserve>
+            {editing?.tipo !== 'CAFE' && (
+              <Form.Item
+                label="Código Espiral"
+                name="espiral"
+                rules={[
+                  { required: true, message: 'Digite el código de la espiral' },
+                  { max: 3, message: 'Máximo 3 caracteres permitidos' },
+                  { pattern: /^[A-Za-z0-9_-]+$/, message: 'Solo letras, números, _ o -' },
+                ]}
+                extra="Escriba el código manualmente (máx 3 carácteres). Ej: A1, ZZ, 01, -A"
+              >
+                <Input
+                  maxLength={3}
+                  placeholder="Ej: A1"
+                  style={{ textTransform: 'uppercase', letterSpacing: 2, fontSize: 18, fontFamily: 'monospace', fontWeight: 600 }}
+                />
+              </Form.Item>
+            )}
+            <Form.Item label={editing?.tipo === 'CAFE' ? 'Insumo (Producto Materia Prima)' : 'Producto Asignado'} name="productoId">
+              <Select
+                allowClear
+                showSearch
+                placeholder={editing?.tipo === 'CAFE' ? 'Seleccione el insumo para esta máquina' : 'Seleccione el producto para esta espiral'}
+                optionFilterProp="label"
+              >
+                {productos.map((p: any) => {
+                  const prov = nombreProveedorProducto(p)
+                  const nm = p.nombreProducto ?? p.nombre ?? ''
+                  return (
+                    <Option key={p.idProducto ?? p.id} value={p.idProducto ?? p.id} label={`${nm}${prov ? ` · ${prov}` : ''}`}>
+                      <span>{nm}</span>
+                      {prov ? <Tag color="cyan" style={{ marginLeft: 8 }}>{prov}</Tag> : null}
+                    </Option>
+                  )
+                })}
+              </Select>
+            </Form.Item>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <Form.Item
+                label="Capacidad Máxima"
+                name="capacidad_max"
+                rules={[{ required: true, message: 'Digite capacidad máxima' }]}
+                initialValue={15}
+              >
+                <InputNumber min={1} style={{ width: '100%' }} />
+              </Form.Item>
+              <Form.Item
+                label="Capacidad Actual"
+                name="cantidad_actual"
+                rules={[{ required: true }]}
+                initialValue={0}
+                extra={editing?.tipo === 'CAFE' ? 'Stock actual del insumo en la tolva de la máquina.' : 'Stock actual del producto en la espiral.'}
+              >
+                <InputNumber min={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </div>
+          </Form>
+        </Spin>
+      </Drawer>
+
+      <Drawer
+        title={editBtnIdx === null ? 'Agregar Botón Café (NRQ)' : `Editar Botón NRQ ${editBtnIdx !== null && botones[editBtnIdx] ? botones[editBtnIdx].boton : ''}`}
+        width={520}
+        open={openBtnModal}
+        onClose={closeBtnModal}
+        destroyOnClose={false}
+        maskClosable={false}
+        zIndex={1500}
+        extra={
+          <Space>
+            <Button onClick={closeBtnModal}>Cancelar</Button>
+            <Button type="primary" onClick={saveBoton}>Guardar</Button>
+          </Space>
+        }
+      >
+        <Spin spinning={false}>
+          <Form form={formBtn} layout="vertical" requiredMark={false} style={{ maxWidth: '100%' }} preserve>
+            <Form.Item
+              label="Código Botón"
+              name="boton"
+              rules={[
+                { required: true, message: 'Digite el código del botón' },
+                { max: 3, message: 'Máximo 3 caracteres permitidos' },
+                { pattern: /^[A-Za-z0-9_-]+$/, message: 'Solo letras, números, _ o -' },
+              ]}
+              extra="Escriba el código manualmente (máx 3 carácteres). Ej: C1, ESP, A12, -B"
+            >
+              <Input
+                maxLength={3}
+                placeholder="Ej: C1"
+                style={{ textTransform: 'uppercase', letterSpacing: 2, fontSize: 18, fontFamily: 'monospace', fontWeight: 600 }}
+              />
+            </Form.Item>
+            <Form.Item
+              label="Producto Dosificado"
+              name="productoId"
+              rules={[{ required: true, message: 'Seleccione un producto DOSIFICADO para este botón' }]}
+              extra={`Solo se muestran productos DOSIFICADOS (receta café). Disponibles: ${productosDosificados.length}`}
+            >
+              <Select
+                allowClear
+                showSearch
+                placeholder="Seleccione el producto DOSIFICADO para este botón"
+                filterOption={(input, option: any) => String(option?.children ?? '').toLowerCase().includes(input.toLowerCase())}
+              >
+                {productosDosificados.map((p: any) => {
+                const prov = nombreProveedorProducto(p)
+                const nm = p.nombreProducto ?? p.nombre ?? ''
+                return (
+                  <Option key={p.idProducto ?? p.id} value={p.idProducto ?? p.id} label={`${nm}${prov ? ` · ${prov}` : ''}`}>
+                    <span>{nm}</span>
+                    {prov ? <Tag color="cyan" style={{ marginLeft: 8 }}>{prov}</Tag> : null}
+                  </Option>
+                )
+              })}
+              </Select>
+            </Form.Item>
+          </Form>
+        </Spin>
+      </Drawer>
+    </div>
+  )
+}
+
+export default Maquinas

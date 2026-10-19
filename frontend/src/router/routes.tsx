@@ -1,0 +1,250 @@
+import { createBrowserRouter, Navigate, Outlet, useLocation } from 'react-router-dom'
+import { useAuth } from '../hooks/useAuth'
+import AppLayout from '../components/layout/AppLayout'
+import Login from '../pages/Login'
+import OperadorLogin from '../pages/OperadorLogin'
+import Dashboard from '../pages/Dashboard'
+import Clientes from '../pages/Clientes'
+import Proveedores from '../pages/Proveedores'
+import Productos from '../pages/Productos'
+import Precios from '../pages/Precios'
+import Operadores from '../pages/Operadores'
+import Maquinas from '../pages/Maquinas'
+import Ingresos from '../pages/Ingresos'
+import Despachos from '../pages/Despachos'
+import PedidosOperador from '../pages/Pedidos'
+import Efectivo from '../pages/Tesoreria/Efectivo'
+import FacturacionNRQ from '../pages/Tesoreria/FacturacionNRQ'
+import VendidoPorVisita from '../pages/Tesoreria/VendidoPorVisita'
+import Roles from '../pages/Admin/Roles'
+import Usuarios from '../pages/Admin/Usuarios'
+import AdminDataPanel from '../pages/Admin/DataPanel'
+import MobileLayout from '../pages/Mobile/MobileLayout'
+import HomeMobile from '../pages/Mobile/Home'
+import InventarioMobile from '../pages/Mobile/Inventario'
+import ContadoresMobile from '../pages/Mobile/Contadores'
+import ResumenMobile from '../pages/Mobile/Resumen'
+import NotFound404 from '../pages/NotFound404'
+import PermissionRoute from '../components/PermissionRoute'
+
+const ProtectedRoute = ({ children }: { children?: any }) => {
+  const { isAuth } = useAuth()
+  const location = useLocation()
+  if (!isAuth) {
+    // Si el usuario intenta acceder a una ruta móvil/operador sin sesión, dirigirlo al portal del operador
+    if (String(location.pathname).startsWith('/mobile')) return <Navigate to="/operador" replace />
+    return <Navigate to="/login" replace />
+  }
+  return children || <Outlet />
+}
+
+const esOperador = (u?: any): boolean => {
+  const rol = String(u?.rolNombre || u?.rol || '').toLowerCase()
+  const perfil = String(u?.perfil || '').toLowerCase()
+  return (
+    rol.includes('operador') ||
+    perfil === 'operador' ||
+    perfil === 'operario' ||
+    Number(u?.idRol) === 4
+  )
+}
+
+// Impide que un OPERADOR acceda al panel administrativo (AppLayout).
+// El operador solo debe vivir dentro de /mobile/*.
+const OperadorGuard = ({ children }: { children?: any }) => {
+  const { isAuth, usuario } = useAuth()
+  if (isAuth && esOperador(usuario)) {
+    return <Navigate to="/mobile/home" replace />
+  }
+  return children || <Outlet />
+}
+
+export const routes = createBrowserRouter([
+  {
+    path: '/login',
+    element: <Login />,
+  },
+  {
+    path: '/operador',
+    element: <OperadorLogin />,
+  },
+  {
+    path: '/',
+    element: (
+      <ProtectedRoute>
+        <OperadorGuard>
+          <AppLayout />
+        </OperadorGuard>
+      </ProtectedRoute>
+    ),
+    children: [
+      { index: true, element: <Navigate to="/dashboard" replace /> },
+      {
+        path: 'dashboard',
+        element: (
+          <PermissionRoute modulo="dashboard" accion="ver">
+            <Dashboard />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'clientes',
+        element: (
+          <PermissionRoute modulo="clientes" accion="ver">
+            <Clientes />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'proveedores',
+        element: (
+          <PermissionRoute modulo="proveedores" accion="ver">
+            <Proveedores />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'productos',
+        element: (
+          <PermissionRoute modulo="productos" accion="ver">
+            <Productos />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'precios',
+        element: (
+          <PermissionRoute modulo="precios" accion="ver">
+            <Precios />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'operadores',
+        element: (
+          <PermissionRoute modulo="operadores" accion="ver">
+            <Operadores />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'maquinas',
+        element: (
+          <PermissionRoute modulo="maquinas" accion="ver">
+            <Maquinas />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'ingresos',
+        element: (
+          <PermissionRoute modulo="inventario" accion="ver">
+            <Ingresos />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'despachos',
+        element: (
+          <PermissionRoute modulo="despachos" accion="ver">
+            <Despachos />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'pedidos',
+        element: (
+          <PermissionRoute modulo="pedidosOperador" accion="ver">
+            <PedidosOperador />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'tesoreria/recaudos',
+        element: (
+          <PermissionRoute modulo="tesoreria" accion="ver">
+            <Efectivo />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'tesoreria/efectivo',
+        element: <Navigate to="/tesoreria/recaudos" replace />,
+      },
+      {
+        path: 'tesoreria/vendido-por-visita',
+        element: (
+          <PermissionRoute modulo="tesoreria" accion="ver">
+            <VendidoPorVisita />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'tesoreria/facturacion-nrq',
+        element: (
+          <PermissionRoute modulo="tesoreria" accion="ver">
+            <FacturacionNRQ />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'admin/roles',
+        element: (
+          <PermissionRoute modulo="admin" accion="ver">
+            <Roles />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'admin/usuarios',
+        element: (
+          <PermissionRoute modulo="admin" accion="ver">
+            <Usuarios />
+          </PermissionRoute>
+        ),
+      },
+      {
+        path: 'admin/data-panel',
+        element: (
+          <PermissionRoute modulo="admin" accion="ver">
+            <AdminDataPanel />
+          </PermissionRoute>
+        ),
+      },
+    ],
+  },
+  {
+    path: '/mobile',
+    element: (
+      <ProtectedRoute>
+        <MobileLayout />
+      </ProtectedRoute>
+    ),
+    children: [
+      { index: true, element: <Navigate to="/mobile/home" replace /> },
+      {
+        path: 'home',
+        element: <HomeMobile />,
+      },
+      {
+        path: 'maquinas',
+        element: <Navigate to="/mobile/home" replace />,
+      },
+      {
+        path: 'inventario/:idMaquina',
+        element: <InventarioMobile />,
+      },
+      {
+        path: 'contadores/:idMaquina',
+        element: <ContadoresMobile />,
+      },
+      {
+        path: 'resumen/:idMaquina',
+        element: <ResumenMobile />,
+      },
+    ],
+  },
+  { path: '*', element: <NotFound404 /> },
+])
+
+export default routes

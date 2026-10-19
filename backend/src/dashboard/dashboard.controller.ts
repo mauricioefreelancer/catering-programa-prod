@@ -1,0 +1,34 @@
+import { Controller, Get, UseGuards, Query } from '@nestjs/common';
+import { DashboardService } from './dashboard.service';
+import { AuthGuard } from '@nestjs/passport';
+import { Permissions } from '../auth/permissions.guard';
+
+@Controller('dashboard')
+@UseGuards(AuthGuard('jwt'))
+export class DashboardController {
+  constructor(private readonly srv: DashboardService) {}
+
+  @Get('gerencia')
+  @Permissions('dashboard', 'ver')
+  gerencia() { return this.srv.gerencia(); }
+
+  @Get('tesoreria')
+  @Permissions('dashboard', 'ver')
+  tesoreria() { return this.srv.tesoreria(); }
+
+  @Get('bodega')
+  @Permissions('dashboard', 'ver')
+  bodega() { return this.srv.bodega(); }
+
+  @Get('dispositivos')
+  @Permissions('dashboard', 'ver')
+  dispositivos(@Query() q: { fechaDesde?: string; fechaHasta?: string; maquinaId?: string; tipoMedio?: string }) {
+    return this.srv.dispositivos(q);
+  }
+
+  @Get('ingresos-bodega')
+  @Permissions('dashboard', 'ver')
+  ingresosBodega(@Query() q: { fechaDesde?: string; fechaHasta?: string; usuarioId?: string }) {
+    return this.srv.ingresosBodega(q);
+  }
+}
