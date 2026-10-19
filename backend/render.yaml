@@ -38,9 +38,5 @@ services:
         value: "30"
     autoDeploy: true
     pullRequestPreviewsEnabled: false
-    maxDiskSpaceGB: 10
     healthCheckPath: "/health"
-    initialDeployHealthCheckTimeoutSeconds: 900
-    healthCheckIntervalSeconds: 20
-    healthCheckTimeoutSeconds: 10
     numInstances: 1
